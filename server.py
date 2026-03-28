@@ -15,7 +15,6 @@ app.add_middleware(
 
 class GameManager:
     def __init__(self) -> None:
-        # Maps the WebSocket connection to the assigned symbol ("X" or "O")
         self.connections: dict[WebSocket, str] = {}
         self.board: list[str] = ["" for _ in range(9)]
         self.turn: str = "X"
@@ -40,11 +39,9 @@ class GameManager:
             await websocket.close(code=1000)
             return
         
-        # Assign "X" to the first player, "O" to the second
         assigned_symbol = "X" if "X" not in self.connections.values() else "O"
         self.connections[websocket] = assigned_symbol
         
-        # Send the assigned symbol directly to the newly connected client
         await websocket.send_json({"type": "init", "symbol": assigned_symbol})
         await self.broadcast()
 
@@ -70,7 +67,6 @@ class GameManager:
         self.winner = None
 
     async def process_move(self, index: int, player_symbol: str) -> None:
-        # Reject the move if the game is over, the cell is taken, or it's not the player's turn
         if self.winner or self.board[index] != "" or self.turn != player_symbol:
             return
         
@@ -91,7 +87,8 @@ async def game_endpoint(websocket: WebSocket) -> None:
         while True:
             data = await websocket.receive_json()
             match data:
-                case {"action": "move", "index": int(index)}:
+                # --- THIS IS THE LINE THAT WAS FIXED ---
+                case {"action": "move", "index": index}: 
                     symbol = manager.connections.get(websocket)
                     if symbol:
                         await manager.process_move(index, symbol)
