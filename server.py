@@ -13,8 +13,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class GameManager:
-    def __init__(self) -> None:
+class Room:
+    def __init__(self, code: str):
+        self.code = code
         self.connections: dict[WebSocket, str] = {}
         self.board: list[str] = ["" for _ in range(9)]
         self.turn: str = "X"
@@ -33,22 +34,10 @@ class GameManager:
             return "Draw"
         return None
 
-    async def connect(self, websocket: WebSocket) -> None:
-        await websocket.accept()
-        if len(self.connections) >= 2:
-            await websocket.close(code=1000)
-            return
-        
-        assigned_symbol = "X" if "X" not in self.connections.values() else "O"
-        self.connections[websocket] = assigned_symbol
-        
-        await websocket.send_json({"type": "init", "symbol": assigned_symbol})
-        await self.broadcast()
-
-    def disconnect(self, websocket: WebSocket) -> None:
-        if websocket in self.connections:
-            del self.connections[websocket]
-        self.reset()
+    def reset(self) -> None:
+        self.board = ["" for _ in range(9)]
+        self.turn = "X"
+        self.winner = None
 
     async def broadcast(self) -> None:
         state = {
@@ -61,45 +50,68 @@ class GameManager:
         for connection in self.connections:
             await connection.send_json(state)
 
-    def reset(self) -> None:
-        self.board = ["" for _ in range(9)]
-        self.turn = "X"
-        self.winner = None
 
-    async def process_move(self, index: int, player_symbol: str) -> None:
-        if self.winner or self.board[index] != "" or self.turn != player_symbol:
-            return
-        
-        self.board[index] = self.turn
-        self.winner = self.check_winner()
-        
-        if not self.winner:
-            self.turn = "O" if self.turn == "X" else "X"
-            
-        await self.broadcast()
+class ConnectionManager:
+    def __init__(self):
+        # Dictionary to store all active rooms
+        self.rooms: dict[str, Room] = {}
 
-manager = GameManager()
+manager = ConnectionManager()
 
-@app.websocket("/ws")
-async def game_endpoint(websocket: WebSocket) -> None:
-    await manager.connect(websocket)
+# The WebSocket endpoint now accepts a {room_code} from the URL
+@app.websocket("/ws/{room_code}")
+async def game_endpoint(websocket: WebSocket, room_code: str) -> None:
+    
+    # If the room doesn't exist yet, create it
+    if room_code not in manager.rooms:
+        manager.rooms[room_code] = Room(room_code)
+    
+    room = manager.rooms[room_code]
+
+    await websocket.accept()
+    
+    # Block if room is full
+    if len(room.connections) >= 2:
+        await websocket.close(code=1000)
+        return
+    
+    assigned_symbol = "X" if "X" not in room.connections.values() else "O"
+    room.connections[websocket] = assigned_symbol
+    
+    await websocket.send_json({"type": "init", "symbol": assigned_symbol, "code": room_code})
+    await room.broadcast()
+
     try:
         while True:
             data = await websocket.receive_json()
             match data:
-                # --- THIS IS THE LINE THAT WAS FIXED ---
-                case {"action": "move", "index": index}: 
-                    symbol = manager.connections.get(websocket)
-                    if symbol:
-                        await manager.process_move(index, symbol)
+                case {"action": "move", "index": index}:
+                    symbol = room.connections.get(websocket)
+                    # ONLY allow moves if there are exactly 2 players in the room
+                    if symbol and len(room.connections) == 2:
+                        if not room.winner and room.board[index] == "" and room.turn == symbol:
+                            room.board[index] = room.turn
+                            room.winner = room.check_winner()
+                            if not room.winner:
+                                room.turn = "O" if room.turn == "X" else "X"
+                            await room.broadcast()
                 case {"action": "reset"}:
-                    manager.reset()
-                    await manager.broadcast()
+                    if len(room.connections) == 2:
+                        room.reset()
+                        await room.broadcast()
                 case _:
                     pass
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        await manager.broadcast()
+        if websocket in room.connections:
+            del room.connections[websocket]
+        
+        # If everyone left, delete the room from memory to save server space
+        if len(room.connections) == 0:
+            del manager.rooms[room_code]
+        else:
+            # If one player left, reset the board for the remaining player
+            room.reset()
+            await room.broadcast()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
